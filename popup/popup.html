@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Netflix 雙語字幕</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <!-- 標題區 -->
+    <header class="popup-header">
+      <div class="logo-section">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
+            <rect x="2" y="3" width="8" height="18" rx="1" fill="#E50914" opacity="0.9"/>
+            <rect x="14" y="3" width="8" height="18" rx="1" fill="#fff" opacity="0.8"/>
+            <path d="M10 8 L14 12 L10 16" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h1 class="logo-text">雙語字幕</h1>
+      </div>
+      <div class="toggle-wrapper">
+        <label class="toggle-switch" id="toggle-label">
+          <input type="checkbox" id="toggle-enabled" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+    </header>
+
+    <!-- 內容區 -->
+    <main class="popup-content">
+      <!-- 狀態指示 -->
+      <div class="status-bar" id="status-bar">
+        <span class="status-dot" id="status-dot"></span>
+        <span class="status-text" id="status-text">偵測中...</span>
+      </div>
+
+      <!-- 語言選擇 -->
+      <section class="section">
+        <label class="section-label">第二字幕語言</label>
+        <div class="select-wrapper">
+          <select id="language-select" disabled>
+            <option value="">-- 等待載入 --</option>
+          </select>
+          <div class="select-arrow">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+      </section>
+
+      <!-- 字幕樣式設定 -->
+      <section class="section">
+        <label class="section-label">字體大小</label>
+        <div class="btn-group" id="font-size-group">
+          <button class="btn-option" data-value="small">小</button>
+          <button class="btn-option active" data-value="medium">中</button>
+          <button class="btn-option" data-value="large">大</button>
+        </div>
+      </section>
+
+      <section class="section">
+        <label class="section-label">字幕位置</label>
+        <div class="btn-group" id="position-group">
+          <button class="btn-option active" data-value="above">原生字幕上方</button>
+          <button class="btn-option" data-value="below">畫面底部</button>
+        </div>
+      </section>
+
+      <section class="section">
+        <label class="section-label">
+          透明度
+          <span class="value-display" id="opacity-value">90%</span>
+        </label>
+        <input type="range" id="opacity-slider" class="range-slider" min="10" max="100" value="90" step="5">
+      </section>
+    </main>
+
+    <!-- 底部 -->
+    <footer class="popup-footer">
+      <span class="footer-text">v1.0.0 · 開啟 Netflix 後自動偵測字幕</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

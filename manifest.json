@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Netflix 雙語字幕",
+  "version": "1.0.0",
+  "description": "在 Netflix 上同時顯示兩種語言的字幕，適合語言學習與多語需求。",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png"
+    },
+    "default_title": "Netflix 雙語字幕"
+  },
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "*://*.netflix.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["*://*.netflix.com/*"],
+      "js": [
+        "content/subtitle-renderer.js",
+        "content/content.js"
+      ],
+      "css": ["styles/subtitle.css"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/injected.js"],
+      "matches": ["*://*.netflix.com/*"]
+    }
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  }
+}

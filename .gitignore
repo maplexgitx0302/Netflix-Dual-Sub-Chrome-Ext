@@ -1,0 +1,25 @@
+# System files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node / Dependencies 
+# (Included for future-proofing in case you add build tools)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Extension built files (optional if you pack it to .zip)
+*.zip
+*.crx
