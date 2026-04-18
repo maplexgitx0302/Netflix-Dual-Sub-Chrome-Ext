@@ -417,7 +417,9 @@ const SubtitleRenderer = (() => {
       });
 
       this.container.appendChild(this.textElement);
-      document.body.appendChild(this.container);
+      
+      const targetParent = document.fullscreenElement || document.body;
+      targetParent.appendChild(this.container);
 
       this._applyStyles();
       this._repositionContainer();
@@ -559,9 +561,19 @@ const SubtitleRenderer = (() => {
      * 全螢幕變更處理
      */
     _onFullscreenChange() {
-      // 重新尋找並附加容器
+      // 確保在全螢幕時將容器移入全螢幕元素內，否則會被遮擋
       setTimeout(() => {
-        if (this.isActive && !document.getElementById('nf-dual-sub-container')) {
+        if (!this.isActive) return;
+        
+        const container = document.getElementById('nf-dual-sub-container');
+        const targetParent = document.fullscreenElement || document.body;
+        
+        if (container) {
+          if (container.parentElement !== targetParent) {
+            targetParent.appendChild(container);
+            this._repositionContainer();
+          }
+        } else {
           this._createContainer();
         }
       }, 500);
