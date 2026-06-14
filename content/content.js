@@ -20,6 +20,7 @@
   let isEnabled = true;
   let currentSettings = {};
   let lastUrl = location.href;
+  let lastWatchId = getWatchId();
   const subtitleContentCache = {}; // language → subtitle text
 
   // ==================== 注入 injected.js ====================
@@ -103,6 +104,7 @@
   // ==================== 訊息處理：來自 Popup 和 Service Worker ====================
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // 以下處理皆為同步回應，sendResponse 在 return 前已呼叫，無需回傳 true
     switch (message.type) {
       case 'GET_STATE':
         sendResponse({
@@ -111,36 +113,33 @@
           currentSecondLanguage: currentSecondLanguage,
           isWatchPage: isWatchPage()
         });
-        return true;
+        break;
 
       case 'SET_ENABLED':
         isEnabled = message.data.enabled;
-        if (isEnabled && renderer) {
-          renderer.setVisible(true);
-        } else if (!isEnabled && renderer) {
-          renderer.setVisible(false);
+        if (renderer) {
+          renderer.setVisible(isEnabled);
         }
         sendResponse({ success: true });
-        return true;
+        break;
 
       case 'SET_SECOND_LANGUAGE':
         selectSecondLanguage(message.data.language);
         sendResponse({ success: true });
-        return true;
+        break;
 
       case 'UPDATE_SETTINGS':
+        // Popup 已將設定寫入 storage，這裡只需套用到渲染器
         currentSettings = { ...currentSettings, ...message.data };
         if (renderer) {
           renderer.updateSettings(currentSettings);
         }
-        // 儲存設定
-        chrome.storage.local.set({ settings: currentSettings });
         sendResponse({ success: true });
-        return true;
+        break;
 
       case 'GET_AVAILABLE_TRACKS':
         sendResponse({ tracks: availableTracks });
-        return true;
+        break;
 
       case 'RETRY_DETECT':
         // 重新觸發 Player API 偵測
@@ -150,7 +149,7 @@
           type: 'RETRY_PLAYER_API'
         }, '*');
         sendResponse({ success: true });
-        return true;
+        break;
     }
   });
 
@@ -164,12 +163,6 @@
 
     availableTracks = tracks;
     console.log(LOG_PREFIX, `可用字幕語言:`, tracks.map(t => `${t.displayName} (${t.bcp47})`).join(', '));
-
-    // 通知 popup 和 background
-    chrome.runtime.sendMessage({
-      type: 'TRACKS_UPDATED',
-      data: { tracks: tracks }
-    }).catch(() => { }); // popup 可能沒開啟
 
     // 如果有之前選擇的語言，自動載入
     if (currentSecondLanguage) {
@@ -293,20 +286,59 @@
     return location.pathname.startsWith('/watch');
   }
 
-  function checkUrlChange() {
-    if (location.href !== lastUrl) {
-      const wasWatch = lastUrl.includes('/watch');
-      lastUrl = location.href;
+  /**
+   * 從目前網址取得影片 ID（/watch/<id>）
+   */
+  function getWatchId() {
+    const m = location.pathname.match(/\/watch\/(\d+)/);
+    return m ? m[1] : null;
+  }
 
-      if (!isWatchPage() && wasWatch) {
-        // 離開觀看頁面
-        destroyRenderer();
-        availableTracks = [];
-      } else if (isWatchPage() && !wasWatch) {
-        // 進入觀看頁面
-        // 等待 Netflix 播放器初始化
-        availableTracks = [];
-      }
+  /**
+   * 清空字幕內容快取（快取以語言為鍵，但內容是該集專屬的）
+   */
+  function clearSubtitleCache() {
+    for (const key of Object.keys(subtitleContentCache)) {
+      delete subtitleContentCache[key];
+    }
+  }
+
+  /**
+   * 切換影集時重置狀態，並重新觸發字幕軌道偵測
+   */
+  function resetForNewEpisode() {
+    availableTracks = [];
+    clearSubtitleCache();
+    destroyRenderer(); // 停止顯示並清除上一集的字幕內容
+
+    // 重新觸發 injected.js 偵測新影集的字幕軌道
+    window.postMessage({
+      source: 'nf-dual-sub-content',
+      type: 'RETRY_PLAYER_API'
+    }, '*');
+  }
+
+  function checkUrlChange() {
+    if (location.href === lastUrl) return;
+
+    const wasWatch = lastUrl.includes('/watch');
+    const prevWatchId = lastWatchId;
+    lastUrl = location.href;
+    const nowWatchId = getWatchId();
+    lastWatchId = nowWatchId;
+
+    if (!isWatchPage() && wasWatch) {
+      // 離開觀看頁面
+      destroyRenderer();
+      availableTracks = [];
+      clearSubtitleCache();
+    } else if (isWatchPage() && !wasWatch) {
+      // 進入觀看頁面，等待 Netflix 播放器初始化
+      resetForNewEpisode();
+    } else if (isWatchPage() && wasWatch && nowWatchId && nowWatchId !== prevWatchId) {
+      // 切換到另一集（watch → watch，影片 ID 改變）
+      console.log(LOG_PREFIX, `偵測到切換影集 ${prevWatchId} → ${nowWatchId}，重新載入字幕`);
+      resetForNewEpisode();
     }
   }
 

@@ -15,6 +15,9 @@
 
   const LOG_PREFIX = '[NF雙語字幕]';
 
+  // 主動切換字幕軌道時的還原函式；攔截器抓到字幕後會立即呼叫以縮短原生字幕閃爍
+  let pendingSwitchRestore = null;
+
   // ==================== 工具函式 ====================
 
   /**
@@ -250,6 +253,7 @@
             const lang = extractLanguageFromUrl(url) || getCurrentPlayerSubtitleLanguage();
             console.log(LOG_PREFIX, `[XHR] 攔截到字幕檔案，語言: ${lang || '未知'}，來源: ${url.substring(0, 80)}`);
             postToContentScript('SUBTITLE_FILE_INTERCEPTED', { url, language: lang, content: text });
+            if (pendingSwitchRestore) pendingSwitchRestore(); // 已抓到字幕，立即還原軌道
             return;
           }
           const tracks = tryExtractTracksFromText(text);
@@ -288,6 +292,7 @@
             const lang = extractLanguageFromUrl(url) || getCurrentPlayerSubtitleLanguage();
             console.log(LOG_PREFIX, `[Fetch] 攔截到字幕檔案，語言: ${lang || '未知'}，來源: ${url.substring(0, 80)}`);
             postToContentScript('SUBTITLE_FILE_INTERCEPTED', { url, language: lang, content: text });
+            if (pendingSwitchRestore) pendingSwitchRestore(); // 已抓到字幕，立即還原軌道
             return;
           }
           const tracks = tryExtractTracksFromText(text);
@@ -307,6 +312,7 @@
   // ==================== 方法 3：Netflix Cadmium Player API ====================
 
   let playerApiAttempts = 0;
+  let playerApiTimer = null; // 確保同時只有一條重試鏈，避免多個入口堆疊
   const MAX_PLAYER_API_ATTEMPTS = 30; // 最多嘗試 30 次（30 秒）
 
   function tryGetPlayerAPI() {
@@ -430,8 +436,9 @@
       // 靜默
     }
 
-    // 尚未成功，繼續重試
-    setTimeout(tryGetPlayerAPI, 1000);
+    // 尚未成功，繼續重試（單一計時器，避免重複入口造成多條並行重試鏈）
+    if (playerApiTimer) clearTimeout(playerApiTimer);
+    playerApiTimer = setTimeout(tryGetPlayerAPI, 1000);
   }
 
   function extractDownloadUrls(ttDownloadables) {
@@ -615,11 +622,18 @@
                         p2[m](arg);
                         switchSucceeded = true;
                         console.log(LOG_PREFIX, `[Player API] 透過 ${m} 切換至 ${language}，等待 XHR 攔截...`);
-                        // 2 秒後恢復原本軌道
-                        setTimeout(() => {
+
+                        // 可重複呼叫的還原函式：攔截器抓到字幕後立即還原，2 秒為安全逾時
+                        let restored = false;
+                        const restore = () => {
+                          if (restored) return;
+                          restored = true;
+                          pendingSwitchRestore = null;
                           try { if (origTrack) p2[m](origTrack); } catch (e) {}
                           postToContentScript('SUBTITLE_SWITCH_DONE', { language });
-                        }, 2000);
+                        };
+                        pendingSwitchRestore = restore;
+                        setTimeout(restore, 2000);
                         break;
                       } catch (e) {}
                     }

@@ -78,13 +78,24 @@ const SubtitleRenderer = (() => {
         text += child.textContent;
       } else if (child.nodeName === 'br' || child.localName === 'br') {
         text += '\n';
-      } else if (child.nodeName === 'span' || child.localName === 'span') {
-        text += extractTextFromNode(child);
       } else {
+        // span 及其他元素一律遞迴取出內部文字
         text += extractTextFromNode(child);
       }
     }
     return text.trim();
+  }
+
+  /**
+   * 從 tts:origin（如 "10% 80%" 或 "192px 864px"）取出垂直 (Y) 數值，
+   * 用於排序同時出現的多行字幕。回傳 undefined 表示無法解析。
+   */
+  function parseOriginY(originStr) {
+    if (!originStr) return undefined;
+    const parts = originStr.trim().split(/\s+/);
+    if (parts.length < 2) return undefined;
+    const y = parseFloat(parts[1]);
+    return isNaN(y) ? undefined : y;
   }
 
   /**
@@ -107,6 +118,52 @@ const SubtitleRenderer = (() => {
       const ttElement = doc.querySelector('tt') || doc.documentElement;
       const tickRate = ttElement.getAttribute('ttp:tickRate') || 
                        ttElement.getAttributeNS('http://www.w3.org/ns/ttml#parameter', 'tickRate');
+
+      // ---- 建立垂直位置對照表，用於排序同時出現的多行字幕 ----
+      const TTS_NS = 'http://www.w3.org/ns/ttml#styling';
+      const XML_NS = 'http://www.w3.org/XML/1998/namespace';
+      const getId = (el) => el.getAttribute('xml:id') || el.getAttributeNS(XML_NS, 'id');
+      const getOrigin = (el) => el.getAttribute('tts:origin') || el.getAttributeNS(TTS_NS, 'origin');
+
+      // style id → Y
+      const styleY = {};
+      doc.querySelectorAll('style').forEach(s => {
+        const id = getId(s);
+        if (!id) return;
+        const y = parseOriginY(getOrigin(s));
+        if (y !== undefined) styleY[id] = y;
+      });
+
+      // region id → Y（region 自身 origin、其引用的 style，或子 style）
+      const regionY = {};
+      doc.querySelectorAll('region').forEach(r => {
+        const id = getId(r);
+        if (!id) return;
+        let y = parseOriginY(getOrigin(r));
+        if (y === undefined) {
+          for (const ref of (r.getAttribute('style') || '').split(/\s+/).filter(Boolean)) {
+            if (styleY[ref] !== undefined) { y = styleY[ref]; break; }
+          }
+        }
+        if (y === undefined) {
+          const childStyle = r.querySelector('style');
+          if (childStyle) y = parseOriginY(getOrigin(childStyle));
+        }
+        if (y !== undefined) regionY[id] = y;
+      });
+
+      // 取得單一 <p> 的垂直位置（region → 引用 style → 自身 origin）
+      const getParagraphPosition = (p) => {
+        const regionRef = p.getAttribute('region');
+        if (regionRef && regionY[regionRef] !== undefined) return regionY[regionRef];
+        let y = parseOriginY(getOrigin(p));
+        if (y === undefined) {
+          for (const ref of (p.getAttribute('style') || '').split(/\s+/).filter(Boolean)) {
+            if (styleY[ref] !== undefined) { y = styleY[ref]; break; }
+          }
+        }
+        return y;
+      };
 
       // 尋找所有 <p> 元素（字幕段落）
       const paragraphs = doc.querySelectorAll('p');
@@ -147,7 +204,8 @@ const SubtitleRenderer = (() => {
           cues.push({
             startTime: startTime,
             endTime: endTime,
-            text: text
+            text: text,
+            position: getParagraphPosition(p)
           });
         }
       });
@@ -181,7 +239,11 @@ const SubtitleRenderer = (() => {
       if (line.includes('-->')) {
         const timeParts = line.split('-->');
         const startTime = parseVTTTime(timeParts[0].trim());
-        const endTime = parseVTTTime(timeParts[1].trim().split(' ')[0]);
+        const rest = timeParts[1].trim();
+        const endTime = parseVTTTime(rest.split(/\s+/)[0]);
+        // 取出 cue 設定中的 line:（垂直位置），用來排序同時出現的多行字幕
+        const lineMatch = rest.match(/\bline:(-?\d+(?:\.\d+)?)/);
+        const position = lineMatch ? parseFloat(lineMatch[1]) : undefined;
 
         let text = '';
         i++;
@@ -194,7 +256,7 @@ const SubtitleRenderer = (() => {
         if (text) {
           // 移除 HTML 標籤
           text = text.replace(/<[^>]+>/g, '');
-          cues.push({ startTime, endTime, text });
+          cues.push({ startTime, endTime, text, position });
         }
       } else {
         i++;
@@ -306,6 +368,7 @@ const SubtitleRenderer = (() => {
 
       this.domObserver = null;
       this._positionTimer = null;
+      this._observerTimer = null;
     }
 
     /**
@@ -527,6 +590,11 @@ const SubtitleRenderer = (() => {
         this.domObserver = null;
       }
 
+      if (this._observerTimer) {
+        clearTimeout(this._observerTimer);
+        this._observerTimer = null;
+      }
+
       if (this.animationFrameId) {
         cancelAnimationFrame(this.animationFrameId);
         this.animationFrameId = null;
@@ -540,7 +608,12 @@ const SubtitleRenderer = (() => {
       if (!this.isActive || !this.videoElement || !this.textElement) return;
 
       const currentTime = this.videoElement.currentTime;
-      const currentCues = findCurrentCues(this.cues, currentTime);
+      let currentCues = findCurrentCues(this.cues, currentTime);
+
+      // 同時出現多行字幕時，依垂直位置（上→下）重新排序，避免上下行顛倒
+      if (currentCues.length > 1 && currentCues.every(c => c.position != null)) {
+        currentCues = currentCues.slice().sort((a, b) => a.position - b.position);
+      }
 
       const newText = currentCues.map(c => c.text).join('\n');
 
@@ -582,7 +655,21 @@ const SubtitleRenderer = (() => {
     /**
      * DOM 變化觀察回呼
      */
-    _observerCallback(mutations) {
+    _observerCallback() {
+      // Netflix DOM 變動非常頻繁，將實際檢查節流為最多每 250ms 一次
+      if (this._observerTimer) return;
+      this._observerTimer = setTimeout(() => {
+        this._observerTimer = null;
+        this._checkDomIntegrity();
+      }, 250);
+    }
+
+    /**
+     * 檢查影片元素與字幕容器是否仍存在，必要時重新接上
+     */
+    _checkDomIntegrity() {
+      if (!this.isActive) return;
+
       // 偵測影片元素是否被替換
       if (!document.contains(this.videoElement)) {
         const newVideo = document.querySelector('video');
@@ -596,7 +683,7 @@ const SubtitleRenderer = (() => {
       }
 
       // 偵測容器是否被移除
-      if (this.isActive && this.container && !document.contains(this.container)) {
+      if (this.container && !document.contains(this.container)) {
         this._createContainer();
       }
     }
