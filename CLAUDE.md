@@ -15,6 +15,11 @@ No build step. Load directly into Chrome:
 
 After any code change, click the reload icon on the extension card in `chrome://extensions/`, then hard-refresh the Netflix tab.
 
+Quick syntax validation (no test suite exists):
+```
+node --check content/content.js content/injected.js content/subtitle-renderer.js popup/popup.js background/service-worker.js
+```
+
 ## Architecture
 
 The extension spans four isolated JavaScript contexts that communicate via message passing:
@@ -52,11 +57,23 @@ Netflix no longer returns download URLs from `getTimedTextTrackList()`. The actu
 
 1. **Passive interception** — `injected.js` monkey-patches `XMLHttpRequest` and `window.fetch`. When Netflix downloads any subtitle file (WebVTT or TTML), `looksLikeSubtitleContent()` detects it and `SUBTITLE_FILE_INTERCEPTED` is posted to `content.js`, which caches it in `subtitleContentCache` keyed by language code.
 
-2. **Language selection** — when the user picks a language in the popup, `selectSecondLanguage()` in `content.js` checks `subtitleContentCache` first. If found, it loads immediately. If not, it posts `FETCH_SUBTITLE_VIA_PLAYER` to `injected.js`.
+2. **Language selection** — when the user picks a language in the popup, `selectSecondLanguage()` in `content.js` checks `subtitleContentCache` first (before even looking up the track). If found, it loads immediately. If the track has no `downloadUrls` (the normal case today), it posts `FETCH_SUBTITLE_VIA_PLAYER` to `injected.js`.
 
-3. **Active switch fallback** — `injected.js` handles `FETCH_SUBTITLE_VIA_PLAYER` by trying ~10 possible Player API setter method names (e.g. `setTimedTextTrack`, `selectTimedTextTrack`, …) to switch Netflix's player to that language, which triggers a subtitle download that the XHR interceptor catches. It restores the original track as soon as the interceptor catches a subtitle (via the `pendingSwitchRestore` callback), with a 2-second timeout as a fallback, then posts `SUBTITLE_SWITCH_DONE`. Restoring on interception instead of always waiting the full 2 s minimizes the flicker of Netflix's native subtitle.
+3. **Active switch fallback** — `injected.js` handles `FETCH_SUBTITLE_VIA_PLAYER` by trying ~10 possible Player API setter method names (e.g. `setTimedTextTrack`, `selectTimedTextTrack`, …) to switch Netflix's player to that language, which triggers a subtitle download that the XHR interceptor catches. It restores the original track as soon as the interceptor catches a subtitle **whose language matches the switch target** (`pendingSwitchRestore` + `pendingSwitchLanguage`), with a 2-second timeout as a fallback, then posts `SUBTITLE_SWITCH_DONE`. The language match matters: during episode transitions Netflix concurrently downloads the *native* track, and restoring on that would abort the switch before the target language ever downloads. An intercepted subtitle with no detectable language during a pending switch is assumed to be the switch target.
 
 4. **Cache hit after switch** — the `SUBTITLE_SWITCH_DONE` handler in `content.js` checks the cache and loads the subtitle if present.
+
+**The "Off" track trap** — Netflix's `getTimedTextTrackList()` starts with an "Off"
+placeholder track that carries the *original audio language's* bcp47 (e.g. `ja` on an
+anime). Any lookup by language code must exclude it (`isOffTrack()` in `injected.js`,
+which checks `isNoneTrack` plus Off/關閉 display names) — otherwise selecting the
+original language matches the Off track first, the active switch flips subtitles to
+"Off", Netflix downloads a near-empty placeholder file, and that ~1-cue file gets
+cached in `subtitleContentCache` under the real language code, permanently shadowing
+the real subtitle for the rest of the episode. Forced-narrative tracks
+(`isForcedNarrative`) are excluded for the same reason. `getCurrentPlayerSubtitleLanguage()`
+also returns `null` while the Off track is active so intercepted files aren't
+mislabeled with its bcp47.
 
 ### Subtitle format support (subtitle-renderer.js)
 
@@ -96,8 +113,9 @@ The overlay `div` is appended to `document.body` with `position: fixed` set via 
 
 ### Netflix SPA considerations
 
-- URL changes are monitored via History API patching in `content.js` because Netflix is a SPA.
-- **Episode changes** (watch→watch navigation, e.g. auto-play next episode) are detected by comparing the `/watch/<id>` video ID in `checkUrlChange()`. On a change, `resetForNewEpisode()` clears `subtitleContentCache`, drops `availableTracks`, destroys the renderer, and re-posts `RETRY_PLAYER_API` so the new episode's subtitle is detected and reloaded automatically (the previously selected language is preserved).
+- URL changes are detected in `content.js` by polling `location.href` every 1 s plus a `popstate` listener. Patching `history.pushState` in the content script does **not** work — the content script's isolated-world `history` binding never sees Netflix's own MAIN-world `pushState` calls.
+- **Episode changes** (watch→watch navigation, e.g. auto-play next episode) are detected by comparing the `/watch/<id>` video ID in `checkUrlChange()`. On a change, `resetForNewEpisode()` clears `subtitleContentCache`, drops `availableTracks`, destroys the renderer, and re-posts `RETRY_PLAYER_API` **after a 1.5 s delay** — firing immediately tends to reach the previous episode's still-live player session and report stale tracks, which stops the retry chain prematurely. `getActivePlayer()` in `injected.js` also prefers session IDs starting with `watch` over trailer/billboard sessions.
+- **Episode-change watchdog** — the subtitle reload chain (detect tracks → select language → active switch → intercept) can fail silently at several points during a transition. `startEpisodeRetry()` in `content.js` re-posts `RETRY_PLAYER_API` every 4 s (max 6 tries) until `handleSecondSubtitleLoaded` succeeds (`secondSubtitleLoaded` flag); each round re-enters the full chain via `handleTracksFound` → `selectSecondLanguage`. The previously selected language is preserved across episodes.
 - The video element can be replaced; a `MutationObserver` in `subtitle-renderer.js` re-attaches the `timeupdate` listener. The observer callback is throttled (~250 ms) since Netflix mutates the DOM constantly.
 - Fullscreen restructures the DOM; the renderer re-attaches after a 500 ms delay.
 - Subtitle track metadata arrives asynchronously; `popup.js` retries detection up to 10 times at 2-second intervals. In `injected.js`, the Player-API detection loop funnels all retries through a single timer (`playerApiTimer`) so repeated entry points don't stack parallel retry chains.

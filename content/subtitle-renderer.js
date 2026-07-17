@@ -70,8 +70,13 @@ const SubtitleRenderer = (() => {
 
   /**
    * 從 XML 文字節點中提取純文字（保留換行）
+   * 注意：只在最外層 trim；遞迴中不可 trim，否則相鄰 span 之間的空格會遺失
    */
   function extractTextFromNode(node) {
+    return collectNodeText(node).trim();
+  }
+
+  function collectNodeText(node) {
     let text = '';
     for (const child of node.childNodes) {
       if (child.nodeType === Node.TEXT_NODE) {
@@ -80,10 +85,10 @@ const SubtitleRenderer = (() => {
         text += '\n';
       } else {
         // span 及其他元素一律遞迴取出內部文字
-        text += extractTextFromNode(child);
+        text += collectNodeText(child);
       }
     }
-    return text.trim();
+    return text;
   }
 
   /**
@@ -279,6 +284,7 @@ const SubtitleRenderer = (() => {
   function parseSubtitle(data) {
     if (!data) return [];
 
+    if (data.charCodeAt(0) === 0xFEFF) data = data.slice(1); // 去除 BOM 再判斷格式
     const trimmed = data.trim();
     if (trimmed.startsWith('<?xml') || trimmed.startsWith('<tt') || trimmed.startsWith('<tt:tt')) {
       return parseTTML(trimmed);
@@ -311,20 +317,35 @@ const SubtitleRenderer = (() => {
 
   /**
    * 使用二分搜尋找到當前時間對應的字幕
+   *
+   * cues 依 startTime 排序，但 endTime 不保證單調（重疊的多行 cue 會打破單調性），
+   * 直接對 endTime 二分搜尋會漏掉「較早開始、較晚結束」的 cue。
+   * 因此改對「累計最大 endTime」（單調不減）搜尋：該值 < currentTime 的前綴
+   * 之內所有 cue 必定已結束，可以安全跳過。
    */
   function findCurrentCues(cues, currentTime) {
     if (!cues || cues.length === 0) return [];
 
-    const results = [];
+    // 惰性建立累計最大 endTime 快取（每次 loadSubtitles 產生新陣列即重建）
+    if (!cues._cumMaxEnd || cues._cumMaxEnd.length !== cues.length) {
+      const cum = new Array(cues.length);
+      let max = -Infinity;
+      for (let i = 0; i < cues.length; i++) {
+        if (cues[i].endTime > max) max = cues[i].endTime;
+        cum[i] = max;
+      }
+      cues._cumMaxEnd = cum;
+    }
+    const cumMaxEnd = cues._cumMaxEnd;
 
-    // 二分搜尋找到第一個可能的字幕
+    // 找到第一個「累計最大 endTime >= currentTime」的索引
     let low = 0;
     let high = cues.length - 1;
-    let startIdx = 0;
+    let startIdx = cues.length; // 全部都已結束時，直接回傳空陣列
 
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
-      if (cues[mid].endTime < currentTime) {
+      if (cumMaxEnd[mid] < currentTime) {
         low = mid + 1;
       } else {
         startIdx = mid;
@@ -333,9 +354,10 @@ const SubtitleRenderer = (() => {
     }
 
     // 從 startIdx 開始，找到所有包含 currentTime 的字幕
+    const results = [];
     for (let i = startIdx; i < cues.length; i++) {
       if (cues[i].startTime > currentTime) break;
-      if (cues[i].startTime <= currentTime && cues[i].endTime >= currentTime) {
+      if (cues[i].endTime >= currentTime) {
         results.push(cues[i]);
       }
     }
@@ -369,6 +391,7 @@ const SubtitleRenderer = (() => {
       this.domObserver = null;
       this._positionTimer = null;
       this._observerTimer = null;
+      this._startRetryTimer = null;
     }
 
     /**
@@ -394,10 +417,18 @@ const SubtitleRenderer = (() => {
     start() {
       if (this.isActive) return;
 
+      if (this._startRetryTimer) {
+        clearTimeout(this._startRetryTimer);
+        this._startRetryTimer = null;
+      }
+
       this._findVideoElement();
       if (!this.videoElement) {
         console.warn(LOG_PREFIX, '找不到影片元素，稍後重試...');
-        setTimeout(() => this.start(), 2000);
+        this._startRetryTimer = setTimeout(() => {
+          this._startRetryTimer = null;
+          this.start();
+        }, 2000);
         return;
       }
 
@@ -412,6 +443,10 @@ const SubtitleRenderer = (() => {
      */
     stop() {
       this.isActive = false;
+      if (this._startRetryTimer) {
+        clearTimeout(this._startRetryTimer);
+        this._startRetryTimer = null;
+      }
       this._detachListeners();
       this._removeContainer();
       this.cues = [];
@@ -620,11 +655,13 @@ const SubtitleRenderer = (() => {
       if (newText !== this.lastDisplayedText) {
         this.lastDisplayedText = newText;
 
+        // 使用 textContent 避免字幕內容被當成 HTML 執行；
+        // white-space: pre-wrap 已能正確呈現 \n 換行
         if (newText) {
-          this.textElement.innerHTML = newText.replace(/\n/g, '<br>');
+          this.textElement.textContent = newText;
           this.textElement.style.opacity = '1';
         } else {
-          this.textElement.innerHTML = '';
+          this.textElement.textContent = '';
           this.textElement.style.opacity = '0';
         }
       }

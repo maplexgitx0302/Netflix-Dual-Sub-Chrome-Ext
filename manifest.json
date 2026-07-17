@@ -30,7 +30,6 @@
         "content/subtitle-renderer.js",
         "content/content.js"
       ],
-      "css": ["styles/subtitle.css"],
       "run_at": "document_start",
       "all_frames": false
     }

@@ -23,6 +23,13 @@
   let lastWatchId = getWatchId();
   const subtitleContentCache = {}; // language → subtitle text
 
+  // 換集後的載入監看：字幕鏈路上任一步靜默失敗時自動重試
+  let secondSubtitleLoaded = false; // 本集的第二字幕是否已成功載入
+  let episodeRetryTimer = null;
+  let episodeRetryCount = 0;
+  const EPISODE_RETRY_MAX = 6;
+  const EPISODE_RETRY_INTERVAL_MS = 4000;
+
   // ==================== 注入 injected.js ====================
 
   function injectScript() {
@@ -65,10 +72,6 @@
     switch (type) {
       case 'SUBTITLE_TRACKS_FOUND':
         handleTracksFound(data.tracks);
-        break;
-
-      case 'SUBTITLE_DATA_INTERCEPTED':
-        // 可以用來快取字幕資料
         break;
 
       case 'SUBTITLE_FILE_INTERCEPTED':
@@ -194,6 +197,13 @@
     // 儲存選擇
     chrome.storage.local.set({ secondLanguage: language });
 
+    // 快取優先：同一集內已攔截過的字幕直接使用
+    if (subtitleContentCache[language]) {
+      console.log(LOG_PREFIX, `[快取] 使用快取的 ${language} 字幕`);
+      handleSecondSubtitleLoaded({ language, data: subtitleContentCache[language] });
+      return;
+    }
+
     // 尋找對應的軌道
     const track = availableTracks.find(t =>
       t.bcp47 === language || t.language === language
@@ -205,11 +215,6 @@
     }
 
     if (track.downloadUrls.length === 0) {
-      if (subtitleContentCache[language]) {
-        console.log(LOG_PREFIX, `[快取] 使用快取的 ${language} 字幕`);
-        handleSecondSubtitleLoaded({ language, data: subtitleContentCache[language] });
-        return;
-      }
       console.log(LOG_PREFIX, `語言 ${language} 沒有直接的下載連結，嘗試透過 Player API 取得...`);
       window.postMessage({
         source: 'nf-dual-sub-content',
@@ -274,6 +279,9 @@
       r.start();
       r.setVisible(isEnabled);
 
+      secondSubtitleLoaded = true;
+      stopEpisodeRetry();
+
       console.log(LOG_PREFIX, `第二字幕已啟動 (${cueCount} 段)`);
     } else {
       console.warn(LOG_PREFIX, '字幕解析結果為空');
@@ -304,18 +312,63 @@
   }
 
   /**
+   * 停止換集後的載入監看
+   */
+  function stopEpisodeRetry() {
+    if (episodeRetryTimer) {
+      clearInterval(episodeRetryTimer);
+      episodeRetryTimer = null;
+    }
+  }
+
+  /**
+   * 換集後監看第二字幕是否載入成功；失敗則定期重新觸發偵測。
+   * 涵蓋的失效情境：換集當下 Player API 回報舊 session 的軌道、
+   * 主動切換字幕被同時下載的原生字幕搶跑而提早還原等競態。
+   */
+  function startEpisodeRetry() {
+    stopEpisodeRetry();
+    episodeRetryCount = 0;
+    episodeRetryTimer = setInterval(() => {
+      if (secondSubtitleLoaded || !isWatchPage() || !currentSecondLanguage) {
+        stopEpisodeRetry();
+        return;
+      }
+      episodeRetryCount++;
+      if (episodeRetryCount > EPISODE_RETRY_MAX) {
+        console.warn(LOG_PREFIX, '[監看] 多次重試仍未載入第二字幕，停止重試');
+        stopEpisodeRetry();
+        return;
+      }
+      console.log(LOG_PREFIX, `[監看] 第二字幕尚未載入，重新觸發偵測 (${episodeRetryCount}/${EPISODE_RETRY_MAX})`);
+      // 重新偵測軌道；SUBTITLE_TRACKS_FOUND 到達後 handleTracksFound
+      // 會自動再呼叫 selectSecondLanguage 走完整條載入鏈
+      window.postMessage({
+        source: 'nf-dual-sub-content',
+        type: 'RETRY_PLAYER_API'
+      }, '*');
+    }, EPISODE_RETRY_INTERVAL_MS);
+  }
+
+  /**
    * 切換影集時重置狀態，並重新觸發字幕軌道偵測
    */
   function resetForNewEpisode() {
     availableTracks = [];
     clearSubtitleCache();
     destroyRenderer(); // 停止顯示並清除上一集的字幕內容
+    secondSubtitleLoaded = false;
 
-    // 重新觸發 injected.js 偵測新影集的字幕軌道
-    window.postMessage({
-      source: 'nf-dual-sub-content',
-      type: 'RETRY_PLAYER_API'
-    }, '*');
+    // 延遲觸發偵測：換集當下新的 player session 尚未就緒，
+    // 立刻偵測容易拿到上一集的舊軌道並讓重試鏈提早停止
+    setTimeout(() => {
+      window.postMessage({
+        source: 'nf-dual-sub-content',
+        type: 'RETRY_PLAYER_API'
+      }, '*');
+    }, 1500);
+
+    startEpisodeRetry();
   }
 
   function checkUrlChange() {
@@ -332,6 +385,8 @@
       destroyRenderer();
       availableTracks = [];
       clearSubtitleCache();
+      stopEpisodeRetry();
+      secondSubtitleLoaded = false;
     } else if (isWatchPage() && !wasWatch) {
       // 進入觀看頁面，等待 Netflix 播放器初始化
       resetForNewEpisode();
@@ -342,24 +397,11 @@
     }
   }
 
-  // 定期檢查 URL 變更（Netflix 使用 History API）
+  // 定期輪詢 URL 變更。Netflix 以 History API 導航，但 content script 位於
+  // isolated world，在這裡 patch history.pushState 攔截不到頁面自己的呼叫，
+  // 因此以輪詢搭配 popstate（事件可跨 world）作為偵測機制。
   setInterval(checkUrlChange, 1000);
-
-  // 也監聽 popstate 事件
   window.addEventListener('popstate', checkUrlChange);
-
-  // 監聽 history.pushState
-  const originalPushState = history.pushState;
-  history.pushState = function () {
-    originalPushState.apply(this, arguments);
-    checkUrlChange();
-  };
-
-  const originalReplaceState = history.replaceState;
-  history.replaceState = function () {
-    originalReplaceState.apply(this, arguments);
-    checkUrlChange();
-  };
 
   // ==================== 初始化 ====================
 

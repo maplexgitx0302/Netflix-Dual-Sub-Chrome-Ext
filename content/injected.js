@@ -15,8 +15,11 @@
 
   const LOG_PREFIX = '[NF雙語字幕]';
 
-  // 主動切換字幕軌道時的還原函式；攔截器抓到字幕後會立即呼叫以縮短原生字幕閃爍
+  // 主動切換字幕軌道時的還原函式；攔截器抓到目標語言字幕後會立即呼叫以縮短原生字幕閃爍
   let pendingSwitchRestore = null;
+  // 目前主動切換的目標語言；用來判斷攔截到的字幕是否就是要抓的那個
+  // （換集時 Netflix 可能同時在下載原生字幕，不能攔到任何字幕就還原）
+  let pendingSwitchLanguage = null;
 
   // ==================== 工具函式 ====================
 
@@ -62,18 +65,53 @@
   }
 
   /**
-   * 從 Player API 取得目前啟用的字幕語言
+   * 取得目前作用中的 Netflix Cadmium player（尚未就緒時回傳 null）
+   * 優先挑選 watch 開頭的 session：換集或預覽時 session 清單可能殘留
+   * 預告片/billboard 的 session，直接取最後一個會拿到錯誤的 player。
    */
-  function getCurrentPlayerSubtitleLanguage() {
+  function getActivePlayer() {
     try {
       const videoPlayer = window.netflix?.appContext?.state?.playerApp?.getAPI?.()?.videoPlayer;
       if (!videoPlayer) return null;
       const sessionIds = videoPlayer.getAllPlayerSessionIds?.();
       if (!sessionIds || !sessionIds.length) return null;
-      const player = videoPlayer.getVideoPlayerBySessionId(sessionIds[sessionIds.length - 1]);
+      const watchIds = sessionIds.filter(id => typeof id === 'string' && id.startsWith('watch'));
+      const candidates = watchIds.length ? watchIds : sessionIds;
+      return videoPlayer.getVideoPlayerBySessionId(candidates[candidates.length - 1]) || null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 判斷是否為「關閉/Off」佔位軌道。
+   * Netflix 的 Off 軌道會帶著影片原始語言的 bcp47（例如日文影片的 Off 軌 bcp47 = "ja"），
+   * 依語言碼比對時會搶在真正的語言軌道之前被選中，導致切換後只抓到近乎空白的佔位字幕。
+   */
+  function isOffTrack(t) {
+    if (!t) return false;
+    if (t.isNoneTrack === true) return true;
+    const name = (t.displayName || t.languageDescription || '').trim().toLowerCase();
+    return name === 'off' || name === 'none' || name === '關閉' || name === '关闭';
+  }
+
+  /**
+   * 是否為強制字幕（forced narrative）軌道
+   */
+  function isForcedTrack(t) {
+    return !!(t && (t.isForced || t.isForcedNarrative));
+  }
+
+  /**
+   * 從 Player API 取得目前啟用的字幕語言
+   * Off 軌道回傳 null：它帶著原始語言的 bcp47，會讓攔截到的檔案被錯誤歸類
+   */
+  function getCurrentPlayerSubtitleLanguage() {
+    try {
+      const player = getActivePlayer();
       if (!player) return null;
       const track = player.getTimedTextTrack?.() || player.getCurrentTimedTextTrack?.() || player.getActiveTimedTextTrack?.();
-      if (track) return track.bcp47 || track.language || null;
+      if (track && !isOffTrack(track)) return track.bcp47 || track.language || null;
     } catch (e) {}
     return null;
   }
@@ -132,7 +170,7 @@
       // 尋找 timedtexttracks 陣列
       if (Array.isArray(obj.timedtexttracks)) {
         obj.timedtexttracks.forEach(track => {
-          if (track && track.language) {
+          if (track && track.language && !isOffTrack(track) && !isForcedTrack(track)) {
             const trackInfo = {
               language: track.language,
               bcp47: track.bcp47 || track.language,
@@ -250,10 +288,13 @@
         }
         if (text) {
           if (looksLikeSubtitleContent(text)) {
-            const lang = extractLanguageFromUrl(url) || getCurrentPlayerSubtitleLanguage();
+            let lang = extractLanguageFromUrl(url) || getCurrentPlayerSubtitleLanguage();
+            // 主動切換期間攔到無法判斷語言的字幕，視為切換目標語言
+            if (!lang && pendingSwitchLanguage) lang = pendingSwitchLanguage;
             console.log(LOG_PREFIX, `[XHR] 攔截到字幕檔案，語言: ${lang || '未知'}，來源: ${url.substring(0, 80)}`);
             postToContentScript('SUBTITLE_FILE_INTERCEPTED', { url, language: lang, content: text });
-            if (pendingSwitchRestore) pendingSwitchRestore(); // 已抓到字幕，立即還原軌道
+            // 僅在抓到「目標語言」時才還原軌道；換集時原生字幕也會同時下載，不能誤觸發
+            if (pendingSwitchRestore && lang === pendingSwitchLanguage) pendingSwitchRestore();
             return;
           }
           const tracks = tryExtractTracksFromText(text);
@@ -289,10 +330,13 @@
       cloned.text().then(text => {
         try {
           if (looksLikeSubtitleContent(text)) {
-            const lang = extractLanguageFromUrl(url) || getCurrentPlayerSubtitleLanguage();
+            let lang = extractLanguageFromUrl(url) || getCurrentPlayerSubtitleLanguage();
+            // 主動切換期間攔到無法判斷語言的字幕，視為切換目標語言
+            if (!lang && pendingSwitchLanguage) lang = pendingSwitchLanguage;
             console.log(LOG_PREFIX, `[Fetch] 攔截到字幕檔案，語言: ${lang || '未知'}，來源: ${url.substring(0, 80)}`);
             postToContentScript('SUBTITLE_FILE_INTERCEPTED', { url, language: lang, content: text });
-            if (pendingSwitchRestore) pendingSwitchRestore(); // 已抓到字幕，立即還原軌道
+            // 僅在抓到「目標語言」時才還原軌道；換集時原生字幕也會同時下載，不能誤觸發
+            if (pendingSwitchRestore && lang === pendingSwitchLanguage) pendingSwitchRestore();
             return;
           }
           const tracks = tryExtractTracksFromText(text);
@@ -324,82 +368,76 @@
 
     try {
       // 方式 A：透過 netflix.appContext
-      const videoPlayer = window.netflix?.appContext?.state?.playerApp?.getAPI?.()?.videoPlayer;
-      if (videoPlayer) {
-         const sessionIds = videoPlayer.getAllPlayerSessionIds?.();
-        if (sessionIds && sessionIds.length > 0) {
-          const player = videoPlayer.getVideoPlayerBySessionId(sessionIds[sessionIds.length - 1]);
-          if (player) {
-            // 首次成功取得 player 時，輸出所有字幕相關方法供偵錯
-            if (playerApiAttempts <= 2) {
-              try {
-                const found = new Set();
-                let proto = player;
-                while (proto && proto !== Object.prototype) {
-                  Object.getOwnPropertyNames(proto).forEach(n => {
-                    if (!found.has(n) && typeof player[n] === 'function' &&
-                        /(text|sub|caption|track|timed|select|setLang)/i.test(n)) {
-                      found.add(n);
-                    }
-                  });
-                  proto = Object.getPrototypeOf(proto);
+      const player = getActivePlayer();
+      if (player) {
+        // 首次成功取得 player 時，輸出所有字幕相關方法供偵錯
+        if (playerApiAttempts <= 2) {
+          try {
+            const found = new Set();
+            let proto = player;
+            while (proto && proto !== Object.prototype) {
+              Object.getOwnPropertyNames(proto).forEach(n => {
+                if (!found.has(n) && typeof player[n] === 'function' &&
+                    /(text|sub|caption|track|timed|select|setLang)/i.test(n)) {
+                  found.add(n);
                 }
-                console.log(LOG_PREFIX, '[Player API] 字幕相關方法:', found.size ? [...found].join(', ') : '(無)');
-              } catch (e) {}
+              });
+              proto = Object.getPrototypeOf(proto);
             }
-            const textTrackList = player.getTimedTextTrackList?.();
-            if (textTrackList && textTrackList.length > 0) {
-              // 先嘗試從 player 內部 manifest 取得含有 download URLs 的軌道資訊
-              let manifestTracks = null;
-              try {
-                // 嘗試多個可能的路徑取得 manifest
-                const manifest = player.getManifest?.() || 
-                                 player.getMovieManifest?.() ||
-                                 player.getPlaybackInfo?.();
-                if (manifest && manifest.timedtexttracks) {
-                  manifestTracks = {};
-                  manifest.timedtexttracks.forEach(mt => {
-                    const key = mt.bcp47 || mt.language;
-                    if (key) manifestTracks[key] = mt;
-                  });
-                }
-              } catch (e) {}
-
-              const tracks = textTrackList.map(t => {
-                const lang = t.bcp47 || t.language || '';
-                let downloadUrls = [];
-                
-                // 優先使用 manifest 中的 download URLs
-                if (manifestTracks && manifestTracks[lang] && manifestTracks[lang].ttDownloadables) {
-                  downloadUrls = extractDownloadUrls(manifestTracks[lang].ttDownloadables);
-                }
-                // 其次使用 track 本身的
-                if (downloadUrls.length === 0 && t.ttDownloadables) {
-                  downloadUrls = extractDownloadUrls(t.ttDownloadables);
-                }
-
-                return {
-                  language: t.language || t.bcp47 || '',
-                  bcp47: lang,
-                  displayName: t.displayName || t.languageDescription || t.language || '',
-                  trackType: t.trackType || 'SUBTITLES',
-                  isForced: t.isForced || false,
-                  rawTrackType: t.rawTrackType || '',
-                  downloadUrls: downloadUrls,
-                  trackId: t.trackId || ''
-                };
-              }).filter(t => !t.isForced && t.language);
-
-              if (tracks.length > 0) {
-                console.log(LOG_PREFIX, `[Player API] 發現 ${tracks.length} 個字幕軌道`);
-                // 輸出每個軌道的 download URL 數量以利偵錯
-                tracks.forEach(t => {
-                  console.log(LOG_PREFIX, `  - ${t.displayName} (${t.bcp47}): ${t.downloadUrls.length} 個下載連結`);
-                });
-                postToContentScript('SUBTITLE_TRACKS_FOUND', { tracks });
-                return; // 成功，停止重試
-              }
+            console.log(LOG_PREFIX, '[Player API] 字幕相關方法:', found.size ? [...found].join(', ') : '(無)');
+          } catch (e) {}
+        }
+        const textTrackList = player.getTimedTextTrackList?.();
+        if (textTrackList && textTrackList.length > 0) {
+          // 先嘗試從 player 內部 manifest 取得含有 download URLs 的軌道資訊
+          let manifestTracks = null;
+          try {
+            // 嘗試多個可能的路徑取得 manifest
+            const manifest = player.getManifest?.() ||
+                             player.getMovieManifest?.() ||
+                             player.getPlaybackInfo?.();
+            if (manifest && manifest.timedtexttracks) {
+              manifestTracks = {};
+              manifest.timedtexttracks.forEach(mt => {
+                const key = mt.bcp47 || mt.language;
+                if (key) manifestTracks[key] = mt;
+              });
             }
+          } catch (e) {}
+
+          const tracks = textTrackList.filter(t => !isOffTrack(t) && !isForcedTrack(t)).map(t => {
+            const lang = t.bcp47 || t.language || '';
+            let downloadUrls = [];
+
+            // 優先使用 manifest 中的 download URLs
+            if (manifestTracks && manifestTracks[lang] && manifestTracks[lang].ttDownloadables) {
+              downloadUrls = extractDownloadUrls(manifestTracks[lang].ttDownloadables);
+            }
+            // 其次使用 track 本身的
+            if (downloadUrls.length === 0 && t.ttDownloadables) {
+              downloadUrls = extractDownloadUrls(t.ttDownloadables);
+            }
+
+            return {
+              language: t.language || t.bcp47 || '',
+              bcp47: lang,
+              displayName: t.displayName || t.languageDescription || t.language || '',
+              trackType: t.trackType || 'SUBTITLES',
+              isForced: t.isForced || false,
+              rawTrackType: t.rawTrackType || '',
+              downloadUrls: downloadUrls,
+              trackId: t.trackId || ''
+            };
+          }).filter(t => !t.isForced && t.language);
+
+          if (tracks.length > 0) {
+            console.log(LOG_PREFIX, `[Player API] 發現 ${tracks.length} 個字幕軌道`);
+            // 輸出每個軌道的 download URL 數量以利偵錯
+            tracks.forEach(t => {
+              console.log(LOG_PREFIX, `  - ${t.displayName} (${t.bcp47}): ${t.downloadUrls.length} 個下載連結`);
+            });
+            postToContentScript('SUBTITLE_TRACKS_FOUND', { tracks });
+            return; // 成功，停止重試
           }
         }
       }
@@ -527,65 +565,61 @@
       console.log(LOG_PREFIX, `[Player API] 嘗試透過 manifest 取得 ${language} 字幕...`);
 
       try {
-        const videoPlayer = window.netflix?.appContext?.state?.playerApp?.getAPI?.()?.videoPlayer;
-        if (videoPlayer) {
-          const sessionIds = videoPlayer.getAllPlayerSessionIds?.();
-          if (sessionIds && sessionIds.length > 0) {
-            const player = videoPlayer.getVideoPlayerBySessionId(sessionIds[sessionIds.length - 1]);
-            if (player) {
-              // 嘗試多種方式取得 manifest
-              let manifest = null;
-              const methods = ['getManifest', 'getMovieManifest', 'getPlaybackInfo'];
-              for (const method of methods) {
-                try {
-                  if (typeof player[method] === 'function') {
-                    manifest = player[method]();
-                    if (manifest && manifest.timedtexttracks) break;
-                    manifest = null;
-                  }
-                } catch (e) {}
+        const player = getActivePlayer();
+
+        if (player) {
+          // 嘗試多種方式取得 manifest
+          let manifest = null;
+          const methods = ['getManifest', 'getMovieManifest', 'getPlaybackInfo'];
+          for (const method of methods) {
+            try {
+              if (typeof player[method] === 'function') {
+                manifest = player[method]();
+                if (manifest && manifest.timedtexttracks) break;
+                manifest = null;
               }
+            } catch (e) {}
+          }
 
-              // 也嘗試遍歷 player 的屬性找到 manifest
-              if (!manifest) {
-                try {
-                  for (const key of Object.keys(player)) {
-                    const val = player[key];
-                    if (val && typeof val === 'object' && val.timedtexttracks) {
-                      manifest = val;
-                      break;
-                    }
-                  }
-                } catch (e) {}
-              }
-
-              if (manifest && manifest.timedtexttracks) {
-                const matchingTrack = manifest.timedtexttracks.find(t =>
-                  (t.bcp47 === language || t.language === language) && !t.isForced
-                );
-
-                if (matchingTrack && matchingTrack.ttDownloadables) {
-                  const urls = extractDownloadUrls(matchingTrack.ttDownloadables);
-                  if (urls.length > 0) {
-                    console.log(LOG_PREFIX, `[Player API] 找到 ${language} 的 ${urls.length} 個下載連結`);
-                    const bestUrl = urls[0].url;
-                    originalFetch(bestUrl)
-                      .then(r => r.text())
-                      .then(text => {
-                        console.log(LOG_PREFIX, `[Player API] ${language} 字幕已下載 (${text.length} bytes)`);
-                        postToContentScript('SECOND_SUBTITLE_LOADED', {
-                          language: language,
-                          data: text,
-                          url: bestUrl
-                        });
-                      })
-                      .catch(err => {
-                        console.error(LOG_PREFIX, `[Player API] 下載失敗:`, err);
-                        postToContentScript('SECOND_SUBTITLE_ERROR', { language, error: err.message });
-                      });
-                    return;
-                  }
+          // 也嘗試遍歷 player 的屬性找到 manifest
+          if (!manifest) {
+            try {
+              for (const key of Object.keys(player)) {
+                const val = player[key];
+                if (val && typeof val === 'object' && val.timedtexttracks) {
+                  manifest = val;
+                  break;
                 }
+              }
+            } catch (e) {}
+          }
+
+          if (manifest && manifest.timedtexttracks) {
+            const matchingTrack = manifest.timedtexttracks.find(t =>
+              (t.bcp47 === language || t.language === language) &&
+              !isForcedTrack(t) && !isOffTrack(t)
+            );
+
+            if (matchingTrack && matchingTrack.ttDownloadables) {
+              const urls = extractDownloadUrls(matchingTrack.ttDownloadables);
+              if (urls.length > 0) {
+                console.log(LOG_PREFIX, `[Player API] 找到 ${language} 的 ${urls.length} 個下載連結`);
+                const bestUrl = urls[0].url;
+                originalFetch(bestUrl)
+                  .then(r => r.text())
+                  .then(text => {
+                    console.log(LOG_PREFIX, `[Player API] ${language} 字幕已下載 (${text.length} bytes)`);
+                    postToContentScript('SECOND_SUBTITLE_LOADED', {
+                      language: language,
+                      data: text,
+                      url: bestUrl
+                    });
+                  })
+                  .catch(err => {
+                    console.error(LOG_PREFIX, `[Player API] 下載失敗:`, err);
+                    postToContentScript('SECOND_SUBTITLE_ERROR', { language, error: err.message });
+                  });
+                return;
               }
             }
           }
@@ -596,50 +630,48 @@
         // 下載完成後會被 XHR 攔截器捕捉並快取
         let switchSucceeded = false;
         try {
-          const vp2 = window.netflix?.appContext?.state?.playerApp?.getAPI?.()?.videoPlayer;
-          if (vp2) {
-            const sids = vp2.getAllPlayerSessionIds?.();
-            if (sids && sids.length > 0) {
-              const p2 = vp2.getVideoPlayerBySessionId(sids[sids.length - 1]);
-              if (p2) {
-                const tList = p2.getTimedTextTrackList?.() || [];
-                const targetTrack = tList.find(t => t.bcp47 === language || t.language === language);
-                if (targetTrack) {
-                  // 記住原本的軌道
-                  let origTrack = null;
-                  try { origTrack = p2.getTimedTextTrack?.() || p2.getCurrentTimedTextTrack?.(); } catch (e) {}
+          if (player) {
+            const tList = player.getTimedTextTrackList?.() || [];
+            const targetTrack = tList.find(t =>
+              (t.bcp47 === language || t.language === language) &&
+              !isOffTrack(t) && !isForcedTrack(t)
+            );
+            if (targetTrack) {
+              // 記住原本的軌道
+              let origTrack = null;
+              try { origTrack = player.getTimedTextTrack?.() || player.getCurrentTimedTextTrack?.(); } catch (e) {}
 
-                  const switchMethods = [
-                    'setTimedTextTrack', 'selectTimedTextTrack', 'changeTimedTextTrack',
-                    'setTextTrack', 'selectTextTrack', 'changeTextTrack',
-                    'setSubtitleTrack', 'switchTimedTextTrack', 'setTrack', 'selectTrack'
-                  ];
-                  for (const m of switchMethods) {
-                    if (typeof p2[m] !== 'function') continue;
-                    // 嘗試傳入 track 物件
-                    for (const arg of [targetTrack, targetTrack.trackId, targetTrack.bcp47].filter(Boolean)) {
-                      try {
-                        p2[m](arg);
-                        switchSucceeded = true;
-                        console.log(LOG_PREFIX, `[Player API] 透過 ${m} 切換至 ${language}，等待 XHR 攔截...`);
+              const switchMethods = [
+                'setTimedTextTrack', 'selectTimedTextTrack', 'changeTimedTextTrack',
+                'setTextTrack', 'selectTextTrack', 'changeTextTrack',
+                'setSubtitleTrack', 'switchTimedTextTrack', 'setTrack', 'selectTrack'
+              ];
+              for (const m of switchMethods) {
+                if (typeof player[m] !== 'function') continue;
+                // 嘗試傳入 track 物件
+                for (const arg of [targetTrack, targetTrack.trackId, targetTrack.bcp47].filter(Boolean)) {
+                  try {
+                    player[m](arg);
+                    switchSucceeded = true;
+                    console.log(LOG_PREFIX, `[Player API] 透過 ${m} 切換至 ${language}，等待 XHR 攔截...`);
 
-                        // 可重複呼叫的還原函式：攔截器抓到字幕後立即還原，2 秒為安全逾時
-                        let restored = false;
-                        const restore = () => {
-                          if (restored) return;
-                          restored = true;
-                          pendingSwitchRestore = null;
-                          try { if (origTrack) p2[m](origTrack); } catch (e) {}
-                          postToContentScript('SUBTITLE_SWITCH_DONE', { language });
-                        };
-                        pendingSwitchRestore = restore;
-                        setTimeout(restore, 2000);
-                        break;
-                      } catch (e) {}
-                    }
-                    if (switchSucceeded) break;
-                  }
+                    // 可重複呼叫的還原函式：攔截器抓到目標語言後立即還原，2 秒為安全逾時
+                    let restored = false;
+                    const restore = () => {
+                      if (restored) return;
+                      restored = true;
+                      pendingSwitchRestore = null;
+                      pendingSwitchLanguage = null;
+                      try { if (origTrack) player[m](origTrack); } catch (e) {}
+                      postToContentScript('SUBTITLE_SWITCH_DONE', { language });
+                    };
+                    pendingSwitchRestore = restore;
+                    pendingSwitchLanguage = language;
+                    setTimeout(restore, 2000);
+                    break;
+                  } catch (e) {}
                 }
+                if (switchSucceeded) break;
               }
             }
           }

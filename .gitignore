@@ -9,6 +9,9 @@ Desktop.ini
 *.swp
 *.swo
 
+# Claude Code (personal settings only; .claude/settings.json is shared)
+.claude/settings.local.json
+
 # Node / Dependencies 
 # (Included for future-proofing in case you add build tools)
 node_modules/
