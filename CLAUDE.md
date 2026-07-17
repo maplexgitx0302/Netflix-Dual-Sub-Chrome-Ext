@@ -17,6 +17,13 @@ After any code change, click the reload icon on the extension card in `chrome://
 
 When committing a user-visible fix or feature, bump `version` in `manifest.json` and update the version/last-updated line at the top of `README.md`.
 
+To build the Chrome Web Store upload ZIP (runtime files only, manifest at ZIP root):
+```
+powershell -ExecutionPolicy Bypass -File package.ps1
+```
+
+The extension name is intentionally `雙語字幕 for Netflix` (nominative "for X" form) — do not lead with "Netflix" in the manifest name, popup title, or store listing; leading with the trademark risks Chrome Web Store rejection/takedown. `PRIVACY.md` is the privacy policy linked from the store listing and includes the non-affiliation disclaimer.
+
 Quick syntax validation (no test suite exists):
 ```
 node --check content/content.js content/injected.js content/subtitle-renderer.js popup/popup.js background/service-worker.js

@@ -29,6 +29,12 @@
   // ==================== 初始化 ====================
 
   async function init() {
+    // 顯示版本號（以 manifest 為準，避免硬編碼過期）
+    const footerVersion = document.getElementById('footer-version');
+    if (footerVersion) {
+      footerVersion.textContent = `v${chrome.runtime.getManifest().version} · `;
+    }
+
     // 取得當前分頁
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) return;
