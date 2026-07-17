@@ -15,6 +15,8 @@ No build step. Load directly into Chrome:
 
 After any code change, click the reload icon on the extension card in `chrome://extensions/`, then hard-refresh the Netflix tab.
 
+When committing a user-visible fix or feature, bump `version` in `manifest.json` and update the version/last-updated line at the top of `README.md`.
+
 Quick syntax validation (no test suite exists):
 ```
 node --check content/content.js content/injected.js content/subtitle-renderer.js popup/popup.js background/service-worker.js
