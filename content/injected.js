@@ -54,12 +54,13 @@
 
   /**
    * 從 URL 嘗試提取語言代碼
+   * 只接受 BCP-47 形狀的值；字幕 CDN 上的 o/v/e 等參數是不透明值，不能當語言用
    */
   function extractLanguageFromUrl(url) {
     try {
       const params = new URL(url).searchParams;
-      const lang = params.get('lang') || params.get('bcp47') || params.get('language') || params.get('locale') || params.get('o');
-      if (lang && lang.length >= 2 && lang.length <= 10) return lang;
+      const lang = params.get('lang') || params.get('bcp47') || params.get('language') || params.get('locale');
+      if (lang && /^[a-z]{2,3}(-[a-z0-9]{2,8})*$/i.test(lang)) return lang;
     } catch (e) {}
     return null;
   }

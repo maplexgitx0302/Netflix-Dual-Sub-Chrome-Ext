@@ -11,7 +11,7 @@
 本擴充功能**不收集、不儲存、不傳輸任何個人資料或瀏覽資料**。
 
 - 所有處理（字幕攔截、解析、顯示）皆在您的瀏覽器本機完成。
-- 不與任何外部伺服器通訊；不含任何分析、追蹤或廣告程式碼。
+- 本擴充功能發出的唯一網路請求，是向 Netflix 自身的字幕伺服器請求字幕檔案——與 Netflix 播放器本身的行為相同。不會與開發者或任何第三方伺服器通訊；不含任何分析、追蹤或廣告程式碼。
 - 唯一儲存的資料是您的偏好設定（啟用狀態、第二字幕語言、字體大小、位置、透明度），儲存於瀏覽器本機的 `chrome.storage.local`，不會離開您的裝置。
 
 ### 權限用途說明
@@ -32,7 +32,7 @@
 This extension **does not collect, store, or transmit any personal or browsing data**.
 
 - All processing (subtitle interception, parsing, rendering) happens locally in your browser.
-- It communicates with no external servers and contains no analytics, tracking, or advertising code.
+- The only network requests it makes are subtitle-file requests to Netflix's own servers — the same requests the Netflix player itself makes. It never communicates with the developer's or any third-party servers, and contains no analytics, tracking, or advertising code.
 - The only data stored is your preferences (enabled state, second subtitle language, font size, position, opacity), kept locally in `chrome.storage.local` and never leaving your device.
 
 ### Permissions

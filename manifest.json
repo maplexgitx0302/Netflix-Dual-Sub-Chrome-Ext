@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "雙語字幕 for Netflix",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "在 Netflix 上同時顯示兩種語言的字幕，適合語言學習與多語需求。",
   "icons": {
     "16": "icons/icon16.png",
